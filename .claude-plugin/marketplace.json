@@ -1,0 +1,14 @@
+{
+  "name": "abed-skills",
+  "owner": {
+    "name": "Abed Al Ghani Shaaban",
+    "email": "abeds@poyesis.fr"
+  },
+  "plugins": [
+    {
+      "name": "abed-skills",
+      "source": "./",
+      "description": "un-mcp (API/MCP → curl-backed skill converter) and its generated trello skill, plus a one-time setup command."
+    }
+  ]
+}

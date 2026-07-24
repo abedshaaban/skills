@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# install.sh — copy a skill from this repo into a target project.
+# install.sh — offline/local installer: copy a skill from this repo into a
+# target project. Prefer `npx skills@latest add abedshaaban/skills` for the
+# normal path; this is the no-network / hacking-on-the-repo fallback.
 #
 # Usage:
-#   ./install.sh <skill> [target-project-dir] [--dir <skills-subdir>] [--symlink] [--force]
-#   ./install.sh --list
+#   scripts/install.sh <skill> [target-project-dir] [--dir <skills-subdir>] [--symlink] [--force]
+#   scripts/install.sh --list
 #
-#   <skill>              Skill to install: un-mcp | trello  (or "all")
+#   <skill>              Skill to install: un-mcp | trello | setup-abed-skills  (or "all")
 #   target-project-dir   Project to install into. Default: current directory.
 #   --dir <subdir>       Skills location inside the target. Default: .agents/skills
 #                        (use ".claude/skills" for Claude Code projects).
@@ -14,17 +16,19 @@
 #   --list               List skills available in this repo and exit.
 #
 # Examples:
-#   ./install.sh trello ~/code/myapp
-#   ./install.sh un-mcp ~/code/myapp --dir .claude/skills
-#   ./install.sh all . --symlink
+#   scripts/install.sh trello ~/code/myapp
+#   scripts/install.sh un-mcp ~/code/myapp --dir .claude/skills
+#   scripts/install.sh all . --symlink
 set -euo pipefail
 
-REPO="$(cd "$(dirname "$0")" && pwd)"
+# Repo root is one level up from scripts/; skills live under skills/.
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+SKILLS_DIR="$REPO/skills"
 
-# Skills = top-level dirs here that contain a SKILL.md.
+# Skills = dirs under skills/ that contain a SKILL.md.
 available() {
   local d
-  for d in "$REPO"/*/; do
+  for d in "$SKILLS_DIR"/*/; do
     [[ -f "$d/SKILL.md" ]] && basename "$d"
   done
 }
@@ -32,11 +36,11 @@ available() {
 if [[ "${1:-}" == "--list" || "${1:-}" == "" ]]; then
   echo "Skills available in this repo:"
   while read -r s; do
-    desc="$(sed -n 's/^description: //p' "$REPO/$s/SKILL.md" | head -c 100)"
+    desc="$(sed -n 's/^description: //p' "$SKILLS_DIR/$s/SKILL.md" | head -c 100)"
     printf '  %-10s %s...\n' "$s" "$desc"
   done < <(available)
   echo
-  echo "Install: ./install.sh <skill> [target-project-dir] [--dir <subdir>] [--symlink] [--force]"
+  echo "Install: scripts/install.sh <skill> [target-project-dir] [--dir <subdir>] [--symlink] [--force]"
   exit 0
 fi
 
@@ -75,7 +79,7 @@ mkdir -p "$DEST"
 DEST="$(cd "$DEST" && pwd)"   # absolute, needed for symlinks
 
 for s in "${SKILLS[@]}"; do
-  src="$REPO/$s"
+  src="$SKILLS_DIR/$s"
   dst="$DEST/$s"
   if [[ -e "$dst" || -L "$dst" ]]; then
     if [[ "$FORCE" -eq 1 ]]; then
