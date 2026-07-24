@@ -1,8 +1,8 @@
 # abedshaaban/skills
 
-A small library of **agent skills** for Poyesis — reusable capabilities you drop
-into a project so an AI coding agent (Claude Code, Cursor, Copilot, and 20+
-others) picks them up automatically.
+A small library of **agent skills** — reusable capabilities you drop into a
+project so an AI coding agent (Claude Code, Cursor, Copilot, and 20+ others)
+picks them up automatically.
 
 A skill is just a directory with a `SKILL.md`. Its front matter (`name` +
 `description`) tells the agent *when* to reach for it; the body and any bundled

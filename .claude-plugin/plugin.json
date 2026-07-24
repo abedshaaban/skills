@@ -1,9 +1,8 @@
 {
   "name": "abed-skills",
   "version": "0.1.0",
-  "description": "Poyesis skills library: turn MCPs/APIs into cheap curl-backed skills (un-mcp) and a ready-made Trello skill.",
+  "description": "Skills library: turn MCPs/APIs into cheap curl-backed skills (un-mcp) and a ready-made Trello skill.",
   "author": {
-    "name": "Abed Al Ghani Shaaban",
-    "email": "abeds@poyesis.fr"
+    "name": "Abed Al Ghani Shaaban"
   }
 }
