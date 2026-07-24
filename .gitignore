@@ -1,0 +1,11 @@
+# Never commit credentials — skills auto-source these.
+.env
+.env.*
+!.env.example
+
+# Local, machine-specific harness settings
+.claude/settings.local.json
+
+# OS / editor cruft
+.DS_Store
+*.swp
