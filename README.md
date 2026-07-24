@@ -15,9 +15,23 @@ context until it fires.
 npx skills@latest add abedshaaban/skills
 ```
 
-Pick the skills and the agent you want; the CLI copies editable copies into your
-project (`.claude/skills/`, `.agents/skills/`, `.cursor/skills/`, … depending on
-the agent).
+Run bare, it opens an interactive picker — tick just the skills you want and the
+agent to target; the CLI copies editable copies into your project
+(`.claude/skills/`, `.agents/skills/`, `.cursor/skills/`, … depending on the
+agent).
+
+**Install one skill only** — skip the picker with `--skill` (repeat for several):
+
+```bash
+npx skills@latest add abedshaaban/skills --skill trello
+npx skills@latest add abedshaaban/skills --skill un-mcp --skill trello
+```
+
+Preview what's available first with `--list`:
+
+```bash
+npx skills@latest add abedshaaban/skills --list
+```
 
 **Claude Code plugin** (managed, read-only) as an alternative:
 
