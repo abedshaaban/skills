@@ -26,14 +26,10 @@ the agent).
 /plugin install abed-skills
 ```
 
-**Offline / hacking on this repo** — the local installer copies straight from a
-clone, no network:
+Or copy a skill by hand — a skill is only files:
 
 ```bash
-scripts/install.sh --list
-scripts/install.sh trello ~/code/myapp            # into .agents/skills by default
-scripts/install.sh un-mcp ~/code/myapp --dir .claude/skills
-scripts/install.sh all . --symlink                # symlink so edits track this repo
+cp -R skills/trello ~/code/myapp/.agents/skills/
 ```
 
 After any install, open the skill's `SETUP.md` and fill your project-root `.env`
@@ -84,8 +80,6 @@ The `npx skills` CLI discovers any `skills/<name>/SKILL.md`, and
 ├── .claude-plugin/         # plugin + marketplace manifests (Claude Code plugin install)
 │   ├── marketplace.json
 │   └── plugin.json
-├── scripts/
-│   └── install.sh          # offline installer (copy/symlink a skill into a project)
 ├── skills/
 │   ├── un-mcp/             # the API → skill converter (assets/, references/)
 │   └── trello/             # example skill produced by un-mcp (scripts/trello.sh, SETUP.md)
