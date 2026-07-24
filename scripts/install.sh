@@ -7,7 +7,7 @@
 #   scripts/install.sh <skill> [target-project-dir] [--dir <skills-subdir>] [--symlink] [--force]
 #   scripts/install.sh --list
 #
-#   <skill>              Skill to install: un-mcp | trello | setup-abed-skills  (or "all")
+#   <skill>              Skill to install: un-mcp | trello  (or "all")
 #   target-project-dir   Project to install into. Default: current directory.
 #   --dir <subdir>       Skills location inside the target. Default: .agents/skills
 #                        (use ".claude/skills" for Claude Code projects).
