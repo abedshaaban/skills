@@ -69,8 +69,8 @@ skills/<skill-name>/
 └── scripts/            # executable helpers (chmod +x them)
 ```
 
-The `npx skills` CLI discovers any `skills/<name>/SKILL.md`, and
-`scripts/install.sh --list` picks it up automatically — no registration step.
+The `npx skills` CLI discovers any `skills/<name>/SKILL.md` automatically — no
+registration step.
 
 ## Layout
 
