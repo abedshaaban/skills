@@ -7,7 +7,7 @@
     {
       "name": "abed-skills",
       "source": "./",
-      "description": "un-mcp (API/MCP → curl-backed skill converter) and its generated trello skill."
+      "description": "un-mcp API/MCP converter with generated Trello and Google Search Console skills."
     }
   ]
 }
