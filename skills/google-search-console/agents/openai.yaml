@@ -1,0 +1,4 @@
+interface:
+  display_name: "Google Search Console"
+  short_description: "Query GSC performance and indexing issues"
+  default_prompt: "Use $google-search-console to inspect my site performance and diagnose pages that are not indexed."

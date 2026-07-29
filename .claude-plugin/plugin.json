@@ -1,7 +1,7 @@
 {
   "name": "abed-skills",
   "version": "0.1.0",
-  "description": "Skills library: turn MCPs/APIs into cheap curl-backed skills (un-mcp) and a ready-made Trello skill.",
+  "description": "Skills library with an API-to-skill converter plus direct Trello and Google Search Console integrations.",
   "author": {
     "name": "Abed Al Ghani Shaaban"
   }
