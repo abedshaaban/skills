@@ -10,12 +10,22 @@ BASE="https://api.trello.com/1"
 # without echoing secrets. Project root resolved via git, else 4 levels up.
 _dir="$(cd "$(dirname "$0")" && pwd)"
 _root="$(git -C "$_dir" rev-parse --show-toplevel 2>/dev/null || echo "$_dir/../../../..")"
+# The write gate must not be switchable from a file, so remember whether
+# TRELLO_YES came from the real environment BEFORE .env is sourced.
+_yes_from_env="${TRELLO_YES:-}"
 for _envf in "$_root/.env" "$_dir/../.env"; do
   if [[ -f "$_envf" ]]; then
     set -a; # shellcheck disable=SC1091
     . "$_envf"; set +a
   fi
 done
+# A TRELLO_YES that exists ONLY in .env is ignored (and called out at the prompt).
+# Otherwise one stray line in a shared, long-lived file would silently disable
+# every confirmation from then on — the opposite of a per-command statement of
+# intent. Credentials still come from .env; consent does not.
+_yes_in_envfile=""
+[[ -z "$_yes_from_env" && -n "${TRELLO_YES:-}" ]] && _yes_in_envfile=1
+TRELLO_YES="$_yes_from_env"
 
 # --- credential guard -------------------------------------------------------
 require() {
@@ -27,6 +37,49 @@ require() {
     fi
   done
   [[ $missing -eq 0 ]] || exit 1
+}
+
+# confirm "<what>" — gate every command that changes or deletes remote data.
+# Printing "About to ..." was not a gate: the request went out in the same breath,
+# so a mistaken id or query hit the real board with nothing to stop it.
+#
+# Three cases, in order:
+#   TRELLO_YES set  → proceed (the caller has already stated intent; this is how
+#                     scripts and agents run it, and the flag is visible in the
+#                     command line being approved)
+#   stdin is a TTY  → ask the human
+#   neither         → refuse, rather than silently mutating a board unattended
+confirm() {
+  local what="$1" ans rc_read=0
+  echo "About to $what" >&2
+  if [[ -n "${TRELLO_YES:-}" ]]; then
+    echo "(TRELLO_YES set — proceeding)" >&2
+    return 0
+  fi
+  [[ -n "$_yes_in_envfile" ]] && \
+    echo "note: TRELLO_YES from .env is ignored — pass it per command instead" >&2
+  if [[ -t 0 ]]; then
+    # -t 60: a TTY inherited by something with nobody at the keyboard (a queued
+    # job, a pty-allocating CI runner, an agent in a terminal session) would
+    # otherwise block here forever. Timing out is the safe direction: no change.
+    read -t 60 -r -p "Proceed? [y/N] " ans || rc_read=$?
+    # A failed read with nothing typed means the timeout fired or the input was
+    # closed. Don't test for rc > 128: bash 4+ reports timeouts that way, but the
+    # bash 3.2 that macOS ships just returns 1, so that check never matched there.
+    if ((rc_read != 0)) && [[ -z "$ans" ]]; then
+      echo >&2
+      echo "No confirmation received (timed out or input closed) — nothing was changed." >&2
+      exit 1
+    fi
+    ans="${ans//[$'\r\n\t ']/}"   # a CRLF terminal leaves a \r that would read as "not y"
+    case "$ans" in
+      y|Y|yes|YES|Yes) return 0 ;;
+    esac
+    echo "Aborted — nothing was changed." >&2
+    exit 1
+  fi
+  echo "Refusing to change Trello data unattended. Re-run with TRELLO_YES=1 to confirm (see SETUP.md)." >&2
+  exit 1
 }
 
 # Resolve a board id: explicit arg > TRELLO_BOARD_ID env. Mirrors the MCP's "active board".
@@ -88,6 +141,25 @@ enc() {
   printf '%s' "$out"
 }
 
+# urldecode a single value (inverse of enc). Used to turn the %XX-escaped filename
+# in an attachment download URL back into a real filename. printf %b expands the
+# \xXX escapes; the leading '%' of each triplet is rewritten to '\x' first, and
+# literal backslashes are doubled so they survive %b unchanged.
+dec() {
+  local s="${1//\\/\\\\}"
+  printf '%b' "${s//%/\\x}"
+}
+
+# Strip anything from a filename that could escape the output directory or start
+# with a dash (which curl/-o would read as a flag). Attachment names are
+# user-supplied on the Trello side, so treat them as untrusted.
+safe_name() {
+  local n="${1##*/}"          # drop any path prefix, incl. ../
+  n="${n//\\//}"; n="${n##*/}"  # same for backslash separators
+  n="${n#"${n%%[!.-]*}"}"     # drop leading dots/dashes
+  printf '%s' "${n:-attachment}"
+}
+
 # enc_query "k1=v1&k2=v2" — urlencode the VALUE side of each key=value pair,
 # leaving keys and & / = structure intact. Lets raw <query> args contain spaces.
 # Pass plain values (not pre-encoded) or %XX will be double-encoded.
@@ -134,6 +206,100 @@ process.stdin.on("data", d => s += d).on("end", () => {
   fi
 }
 
+# --- attachment download ----------------------------------------------------
+# Attachment binaries live on trello.com (NOT api.trello.com) and that host
+# REJECTS ?key=&token= auth with 401 — the only accepted credential is an
+# `Authorization: OAuth oauth_consumer_key="...", oauth_token="..."` header.
+# So downloads cannot reuse call(); they need their own curl invocation.
+
+# Only ever send that header to Trello-owned hosts over TLS. An attachment URL is
+# untrusted data: a *link* attachment (attach-url) carries whatever URL someone
+# typed, so a card can contain an arbitrary URL and the token must not follow it.
+#
+# The authority must be extracted exactly as a URL parser would, or the check can
+# be fooled. It ends at the first "/", "?" OR "#" — cutting only on "/" and "?"
+# left `https://evil.example.com#@trello.com/x` looking like host `trello.com`
+# (the later `##*@` userinfo strip ate the fragment), while curl would have sent
+# the token to evil.example.com. https:// is required so the token is never put
+# on the wire in cleartext.
+trello_host() {
+  local url="$1" h rc=1 restore   # rc: 0 = allowed, 1 = wrong host, 2 = not https
+  h="${url#*://}"
+  h="${h%%[/?#]*}"    # authority ends at the first / ? or # — all three
+  h="${h##*@}"        # drop any userinfo
+  h="${h%%:*}"        # drop any port
+  # Host names are case-insensitive, so the allowlist must be matched that way —
+  # and `${h,,}` is bash 4+, which excludes the bash 3.2 that macOS still ships.
+  # shopt is global, so save and restore the caller's setting.
+  restore="$(shopt -p nocasematch)"; shopt -s nocasematch
+  case "$url" in https://*) ;; *) rc=2 ;; esac
+  if [[ $rc -ne 2 ]]; then
+    case "$h" in
+      trello.com|*.trello.com|*.trellocdn.com|trello.services|*.trello.services) rc=0 ;;
+    esac
+  fi
+  eval "$restore"
+  case $rc in
+    0) return 0 ;;
+    2) echo "Refusing non-https attachment URL (token must not travel in cleartext): $url" >&2 ;;
+    *) echo "Refusing to send Trello credentials to non-Trello host: ${h:-<none>}" >&2 ;;
+  esac
+  return 1
+}
+
+# dl URL OUTPATH — write an authenticated attachment to OUTPATH.
+# Deliberately does NOT pass -L: curl can forward a custom Authorization header
+# across a redirect, so following one blindly could hand the token to another
+# host. A 3xx is reported instead (Trello serves these 200 directly today).
+# The URL and header go through a stdin config (-K -), so the token stays out of
+# `ps` output and shell history, same as call().
+#
+# Writes to a sibling temp file and moves it into place only on success: curl -o
+# truncates its target before the response status is known, so downloading
+# straight to OUTPATH destroyed a pre-existing file whenever the fetch 4xx'd.
+dl() {
+  local url="$1" out="$2" code tmp
+  trello_host "$url" || return 1
+  # --create-dirs applies to the temp path, so the destination dir still gets made.
+  tmp="$out.part.$$"
+  code="$(curl -sS --create-dirs -o "$tmp" -w '%{http_code}' -K - <<CFG
+url = "$url"
+header = "Authorization: OAuth oauth_consumer_key=\"$TRELLO_API_KEY\", oauth_token=\"$TRELLO_TOKEN\""
+CFG
+)" || { rm -f "$tmp"; return 1; }
+  if [[ "$code" =~ ^[0-9]+$ ]] && ((code >= 300)); then
+    echo "HTTP:$code for $url" >&2
+    ((code < 400)) && echo "(redirect not followed — credentials are not forwarded across hosts)" >&2
+    rm -f "$tmp"
+    return 1
+  fi
+  mv -f "$tmp" "$out"
+  echo "HTTP:$code" >&2
+  printf '%s\n' "$out"
+}
+
+# Default download directory for a card: ./trello-attachments/<cardId>
+dl_dir() { printf '%s' "${2:-trello-attachments/$1}"; }
+
+# Emit "url<TAB>filename" lines for every attachment on a card. Needs node (the
+# fallback raw-JSON path can't be looped over), so fail loudly if it's absent.
+attachment_rows() {
+  command -v node >/dev/null 2>&1 || {
+    echo "node is required to enumerate attachments (see SETUP.md)" >&2; return 1; }
+  call GET "/cards/$1/attachments" "fields=id,name,url,fileName,mimeType,bytes" \
+    | node -e '
+let s = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", d => s += d).on("end", () => {
+  for (const a of JSON.parse(s)) {
+    if (!a.url) continue;
+    // Prefix the id: several attachments on one card are commonly all "image.png".
+    const base = a.fileName || a.name || "attachment";
+    console.log(`${a.url}\t${a.id}-${base}`);
+  }
+});'
+}
+
 # --- commands ---------------------------------------------------------------
 cmd="${1:-help}"; shift || true
 # Every command except help needs credentials — check once here (was per-branch).
@@ -172,27 +338,35 @@ case "$cmd" in
   add-list)  # MCP: add_list_to_board (write)
     name="${1:?usage: add-list \"<name>\" [boardId]}"
     b="$(board_or_default "${2:-}")"
-    echo "About to create list \"$name\" on board $b" >&2
+    confirm "create list \"$name\" on board $b"
     call POST "/lists" "name=$(enc "$name")&idBoard=$b" | pretty 'j=>({id:j.id,name:j.name})'
     ;;
 
   archive-list)  # MCP: archive_list (write)
     id="${1:?usage: archive-list <listId>}"
-    echo "About to archive list $id" >&2
+    confirm "archive list $id"
     call PUT "/lists/$id/closed" "value=true" | pretty 'j=>({id:j.id,name:j.name,closed:j.closed})'
     ;;
 
   update-list)  # MCP: update_list / update_list_position. Pass raw query, e.g. name=Foo or pos=top
     id="${1:?usage: update-list <listId> <query> (e.g. name=Foo  |  pos=top  |  closed=true)}"
     q="${2:?usage: update-list <listId> <query>}"
-    echo "About to update list $id ($q)" >&2
+    confirm "update list $id ($q)"
     call PUT "/lists/$id" "$(enc_query "$q")" | pretty 'j=>({id:j.id,name:j.name,pos:j.pos,closed:j.closed})'
     ;;
 
   # ---- Cards --------------------------------------------------------------
   get-card)  # MCP: get_card
     id="${1:?usage: get-card <cardId>}"
-    call GET "/cards/$id" "fields=id,name,desc,due,start,dueComplete,idList,labels,url&customFieldItems=true" | pretty 'j=>j'
+    # attachments=true so images/files on the card show up here; attachment_fields
+    # is narrowed (no `previews`, which is ~7 verbose entries per image) and the
+    # filter re-adds just one preview URL per attachment.
+    call GET "/cards/$id" "fields=id,name,desc,due,start,dueComplete,idList,labels,url&customFieldItems=true&attachments=true&attachment_fields=id,name,fileName,mimeType,bytes,date,url,isUpload,previews" \
+      | pretty 'j=>({...j, attachments:(j.attachments||[]).map(a=>({
+          id:a.id, name:a.name, mimeType:a.mimeType, bytes:a.bytes, date:a.date,
+          url:a.url,
+          preview:(a.previews||[]).slice(-1).map(p=>p.url)[0] || null
+        }))})'
     ;;
 
   cards-in-list)  # MCP: get_cards_by_list_id
@@ -208,27 +382,27 @@ case "$cmd" in
     listId="${1:?usage: add-card <listId> \"<name>\" [\"<desc>\"]}"
     name="${2:?usage: add-card <listId> \"<name>\" [\"<desc>\"]}"
     desc="${3:-}"
-    echo "About to create card \"$name\" in list $listId" >&2
+    confirm "create card \"$name\" in list $listId"
     call POST "/cards" "idList=$listId&name=$(enc "$name")&desc=$(enc "$desc")" | pretty 'j=>({id:j.id,name:j.name,url:j.url})'
     ;;
 
   update-card)  # MCP: update_card_details. Pass raw query, e.g. name=New&desc=...&due=2026-08-01T12:00:00Z
     id="${1:?usage: update-card <cardId> <query> (e.g. name=New  |  dueComplete=true  |  desc=...)}"
     q="${2:?usage: update-card <cardId> <query>}"
-    echo "About to update card $id ($q)" >&2
+    confirm "update card $id ($q)"
     call PUT "/cards/$id" "$(enc_query "$q")" | pretty 'j=>({id:j.id,name:j.name,due:j.due,dueComplete:j.dueComplete})'
     ;;
 
   move-card)  # MCP: move_card (write)
     id="${1:?usage: move-card <cardId> <listId>}"
     listId="${2:?usage: move-card <cardId> <listId>}"
-    echo "About to move card $id to list $listId" >&2
+    confirm "move card $id to list $listId"
     call PUT "/cards/$id" "idList=$listId" | pretty 'j=>({id:j.id,name:j.name,idList:j.idList})'
     ;;
 
   archive-card)  # MCP: archive_card (write)
     id="${1:?usage: archive-card <cardId>}"
-    echo "About to archive card $id" >&2
+    confirm "archive card $id"
     call PUT "/cards/$id/closed" "value=true" | pretty 'j=>({id:j.id,name:j.name,closed:j.closed})'
     ;;
 
@@ -243,20 +417,20 @@ case "$cmd" in
   add-comment)  # MCP: add_comment (write)
     id="${1:?usage: add-comment <cardId> \"<text>\"}"
     text="${2:?usage: add-comment <cardId> \"<text>\"}"
-    echo "About to comment on card $id" >&2
+    confirm "comment on card $id"
     call POST "/cards/$id/actions/comments" "text=$(enc "$text")" | pretty 'j=>({id:j.id,text:j.data&&j.data.text})'
     ;;
 
   update-comment)  # MCP: update_comment (write)
     id="${1:?usage: update-comment <commentId> \"<text>\"}"
     text="${2:?usage: update-comment <commentId> \"<text>\"}"
-    echo "About to edit comment $id" >&2
+    confirm "edit comment $id"
     call PUT "/actions/$id" "text=$(enc "$text")" | pretty 'j=>({id:j.id,text:j.data&&j.data.text})'
     ;;
 
   delete-comment)  # MCP: delete_comment (destructive)
     id="${1:?usage: delete-comment <commentId>}"
-    echo "About to DELETE comment $id — irreversible" >&2
+    confirm "DELETE comment $id — irreversible"
     call DELETE "/actions/$id"
     ;;
 
@@ -276,7 +450,7 @@ case "$cmd" in
   add-checklist-item)  # MCP: add_checklist_item (write). Needs the checklist id (from card-checklists)
     checklistId="${1:?usage: add-checklist-item <checklistId> \"<text>\"}"
     text="${2:?usage: add-checklist-item <checklistId> \"<text>\"}"
-    echo "About to add item to checklist $checklistId" >&2
+    confirm "add item to checklist $checklistId"
     call POST "/checklists/$checklistId/checkItems" "name=$(enc "$text")" | pretty 'j=>({id:j.id,name:j.name,state:j.state})'
     ;;
 
@@ -284,23 +458,82 @@ case "$cmd" in
     cardId="${1:?usage: update-checklist-item <cardId> <checkItemId> <query> (e.g. state=complete)}"
     itemId="${2:?usage: update-checklist-item <cardId> <checkItemId> <query>}"
     q="${3:?usage: update-checklist-item <cardId> <checkItemId> <query>}"
-    echo "About to update check item $itemId on card $cardId ($q)" >&2
+    confirm "update check item $itemId on card $cardId ($q)"
     call PUT "/cards/$cardId/checkItem/$itemId" "$(enc_query "$q")" | pretty 'j=>({id:j.id,name:j.name,state:j.state})'
     ;;
 
   delete-checklist-item)  # MCP: delete_checklist_item (destructive)
     cardId="${1:?usage: delete-checklist-item <cardId> <checkItemId>}"
     itemId="${2:?usage: delete-checklist-item <cardId> <checkItemId>}"
-    echo "About to DELETE check item $itemId on card $cardId — irreversible" >&2
+    confirm "DELETE check item $itemId on card $cardId — irreversible"
     call DELETE "/cards/$cardId/checkItem/$itemId"
     ;;
 
   # ---- Attachments --------------------------------------------------------
+  card-attachments)  # attachments on a card, with the id needed by download-attachment
+    id="${1:?usage: card-attachments <cardId>}"
+    call GET "/cards/$id/attachments" "fields=id,name,fileName,mimeType,bytes,date,url,isUpload,previews" \
+      | pretty 'j=>j.map(a=>({
+          id:a.id, name:a.name, fileName:a.fileName, mimeType:a.mimeType, bytes:a.bytes,
+          date:a.date, isUpload:a.isUpload, url:a.url,
+          preview:(a.previews||[]).slice(-1).map(p=>p.url)[0] || null
+        }))'
+    ;;
+
+  download-attachment)  # MCP: download_attachment. Needs the OAuth header — a plain GET of the url 401s.
+    id="${1:?usage: download-attachment <cardId> <attachmentId> [outPath]}"
+    aid="${2:?usage: download-attachment <cardId> <attachmentId> [outPath]}"
+    out="${3:-}"
+    # Without node, pretty() echoes the raw JSON body, so url/fname below would be
+    # whole documents rather than fields — refuse instead of building a junk URL.
+    command -v node >/dev/null 2>&1 || {
+      echo "node is required to resolve an attachment URL (see SETUP.md)" >&2; exit 1; }
+    meta="$(call GET "/cards/$id/attachments/$aid" "fields=url,name,fileName")"
+    url="$(printf '%s' "$meta" | pretty 'j=>j.url||""')"
+    fname="$(printf '%s' "$meta" | pretty 'j=>j.fileName||j.name||""')"
+    [[ -n "$url" ]] || { echo "Attachment $aid on card $id has no downloadable url" >&2; exit 1; }
+    # Fall back to the URL's own basename when the API gives no filename.
+    [[ -n "$fname" ]] || fname="$(dec "${url##*/}")"
+    [[ -n "$out" ]] || out="$(dl_dir "$id")/$(safe_name "$fname")"
+    dl "$url" "$out"
+    ;;
+
+  download-card-attachments)  # every attachment on a card, into a directory (default ./trello-attachments/<cardId>)
+    id="${1:?usage: download-card-attachments <cardId> [dir]}"
+    dir="$(dl_dir "$id" "${2:-}")"
+    n=0; failed=0
+    # Read the whole listing before downloading: the loop body runs curl, which
+    # would otherwise consume the same stdin the rows are being read from.
+    rows="$(attachment_rows "$id")"
+    while IFS=$'\t' read -r url fname; do
+      [[ -n "$url" ]] || continue
+      # fname comes from the API (already decoded) — no dec() here, or a literal
+      # '%' in an attachment name would be misread as an escape.
+      # A card can hold *link* attachments pointing anywhere; dl() refuses those,
+      # and one refusal must not abandon the remaining uploads.
+      if dl "$url" "$dir/$(safe_name "$fname")"; then n=$((n + 1)); else failed=$((failed + 1)); fi
+    done <<< "$rows"
+    if ((failed)); then
+      echo "Downloaded $n attachment(s) to $dir — $failed skipped or failed" >&2
+    else
+      echo "Downloaded $n attachment(s) to $dir" >&2
+    fi
+    # Non-zero on partial failure so a caller can tell "some" from "all".
+    ((failed == 0))
+    ;;
+
+  download-url)  # download any Trello attachment/preview URL (e.g. an ![image](...) link inside a card desc)
+    url="${1:?usage: download-url <trelloUrl> [outPath]}"
+    out="${2:-}"
+    [[ -n "$out" ]] || out="trello-attachments/$(safe_name "$(dec "${url%%[?#]*}")")"
+    dl "$url" "$out"
+    ;;
+
   attach-url)  # MCP: attach_image_to_card / attach_file_to_card (write; both are POST url attachments)
     id="${1:?usage: attach-url <cardId> <url> [\"<name>\"]}"
     url="${2:?usage: attach-url <cardId> <url> [\"<name>\"]}"
     name="${3:-}"
-    echo "About to attach $url to card $id" >&2
+    confirm "attach $url to card $id"
     call POST "/cards/$id/attachments" "url=$(enc "$url")&name=$(enc "$name")" | pretty 'j=>({id:j.id,name:j.name,url:j.url})'
     ;;
 
